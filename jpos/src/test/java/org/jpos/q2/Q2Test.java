@@ -30,6 +30,10 @@ import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import javax.management.MBeanServer;
 import javax.management.ObjectInstance;
@@ -37,6 +41,8 @@ import javax.management.ObjectName;
 
 import org.jdom2.Document;
 import org.jdom2.Element;
+import org.jdom2.output.XMLOutputter;
+import org.jpos.q2.qbean.LoggerAdaptor;
 import org.jpos.q2.qbean.SystemMonitor;
 import org.jpos.util.Log;
 import org.junit.jupiter.api.*;
@@ -362,5 +368,59 @@ public class Q2Test {
         q2.ready(5000L);
         m_q2.shutdown();
         q2.shutdown();
+    }
+
+    /**
+     * This test verify that the flag "-ff" doesn't change
+     * the behaviour of Q2 when all descriptors are valid
+     */
+    @Test
+    void testFailFastFlagDoesntAffectValidDeployments() throws Exception {
+
+        // given a temp deploy directory
+        Path deployDir = Files.createTempDirectory("q2_test");
+        // given a valid QBean descriptor
+        writeSimpleQBean(deployDir, "10_valid.xml", LoggerAdaptor.class.getName());
+
+        // when we start a new Q2
+        Q2 q2 = new Q2(new String[] { "-ff", "-d", deployDir.toString() });
+        q2.start();
+
+        // then the Q2 starts in less than 5 seconds
+        assertTrue(q2.ready(5000), "Q2 should de ready");
+
+        // cleanup
+        q2.shutdown();
+    }
+
+    /**
+     * This test verify that the Q2 doesn't starts when a DESCRIPTOR is invalid
+     * and the flag "-ff" is used
+     */
+    @Test
+    void testFailFastOnInvalidDescriptor() throws Exception {
+
+        // given a temp deploy directory
+        Path deployDir = Files.createTempDirectory("q2_test");
+        // given a INVALID QBean descriptor
+        writeSimpleQBean(deployDir, "10_invalid.xml", LoggerAdaptor.class.getName() + "2");
+
+        // when we start a new Q2
+        Q2 q2 = new Q2(new String[] { "-ff", "-d", deployDir.toString() });
+        q2.start();
+
+        // then the Q2 starts should fail to start
+        assertFalse(q2.ready(10_000), "Q2 should de ready");
+
+        // cleanup
+        q2.shutdown();
+    }
+
+    private void writeSimpleQBean(Path folder, String name, String className) throws IOException {
+        XMLOutputter writer = new XMLOutputter();
+        Path target = folder.resolve(name);
+        try (FileOutputStream fileout = new FileOutputStream(target.toFile())) {
+            writer.output(new Element("bean") .setAttribute("class", className) , fileout);
+        }
     }
 }

@@ -139,7 +139,12 @@ public class Q2 implements DirectoryStream.Filter<Path>, FileFilter, Runnable {
     private static String DEPLOY_PREFIX = "META-INF/q2/deploy/";
     private static String CFG_PREFIX = "META-INF/q2/cfg/";
     private String nameRegistrarKey;
-    
+
+    /**
+     * Don't start the container if a QBean fails to start
+     */
+    private boolean failFast = false;
+
     public Q2 (String[] args, BundleContext bundleContext) {
         super();
         this.args = args;
@@ -418,6 +423,11 @@ public class Q2 implements DirectoryStream.Filter<Path>, FileFilter, Runnable {
                     } else {
                         // deploy failed, clean up.
                         iter.remove();
+                        if (failFast) {
+                            getLog().warn ("Shutting down because the QBean '" + f.toString() + "' failed to start");
+                            shutdown();
+                            return;
+                        }
                     }
                 } else if (deployed != Files.getLastModifiedTime(f).toMillis()) {
                     undeploy (f);
@@ -644,6 +654,10 @@ public class Q2 implements DirectoryStream.Filter<Path>, FileFilter, Runnable {
         try {
             factory.startQBean (this, instance.getObjectName());
         } catch (Exception e) {
+            if (failFast) {
+                getLog().warn ("Shutting down because the QBean '" + instance.getClassName() + "' failed to start", e);
+                shutdown();
+            }
             getLog().warn ("start", e);
         }
     }
@@ -749,6 +763,7 @@ public class Q2 implements DirectoryStream.Filter<Path>, FileFilter, Runnable {
         options.addOption ("Ns", "no-scan", false, "Disables deploy directory scan");
         options.addOption ("Nd", "no-dynamic", false, "Disables dynamic classloader");
         options.addOption ("E", "environment", true, "Environment name");
+        options.addOption ("ff", "fail-fast", false, "Fail fast if a QBean is invalid");
 
         try {
             CommandLine line = parser.parse (options, args);
@@ -794,6 +809,7 @@ public class Q2 implements DirectoryStream.Filter<Path>, FileFilter, Runnable {
             sshAuthorizedKeys = line.getOptionValue ("sa", "cfg/authorized_keys");
             sshUser = line.getOptionValue("su", "admin");
             sshHostKeyFile = line.getOptionValue("sh", "cfg/hostkeys.ser");
+            failFast = line.hasOption("ff");
         } catch (MissingArgumentException e) {
             System.out.println("ERROR: " + e.getMessage());
             System.exit(1);
