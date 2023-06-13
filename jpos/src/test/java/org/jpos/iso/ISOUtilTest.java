@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.Assert.assertArrayEquals;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -43,12 +44,35 @@ import java.util.BitSet;
 import java.util.Calendar;
 import java.util.GregorianCalendar;
 import java.util.TimeZone;
+import java.util.regex.Pattern;
 
-import org.junit.jupiter.api.Assertions;
+import org.fest.assertions.Assert;
 import org.junit.jupiter.api.Test;
+import org.junit.Assert;
+import java.util.Arrays;
 
 public class ISOUtilTest {
     final String lineSep = System.getProperty("line.separator");
+
+
+    
+    @Test
+    public void testHex2byte_ValidInput() {
+        byte[] result = ISOUtil.hex2byte("1A2B3C");
+        byte [] expected = {0x1A, 0x2B, 0x3C}; 
+        assertArrayEquals(expected, result);
+    }
+
+    @Test
+    public void testHex2byte_InvalidInput_ThrowsExceptionWithMessage() {
+
+        Exception exception = assertThrows(IllegalArgumentException.class, () -> {
+            ISOUtil.hex2byte("1A2B3C");
+        }, "Not hex");
+
+        assertEquals("Not hex", exception.getMessage());
+    }
+
 
     @Test
     public void testAsciiToEbcdic() throws Throwable {

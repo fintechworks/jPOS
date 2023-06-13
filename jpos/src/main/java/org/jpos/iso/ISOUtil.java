@@ -32,6 +32,10 @@ import java.util.StringJoiner;
 import java.util.StringTokenizer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.regex.Pattern;
+import java.math.BigInteger;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 /**
  * various functions needed to pack/unpack ISO-8583 fields
@@ -177,7 +181,7 @@ public class ISOUtil {
     public static String zeropad(String s, int len) throws ISOException {
         return padleft(s, len, '0');
     }
-
+   
     /**
      * zeropads a long without throwing an ISOException (performs modulus operation)
      *
@@ -680,8 +684,26 @@ public class ISOUtil {
      * @return byte array
      */
     public static byte[] hex2byte (String s) {
-        return hex2byte (s, CHARSET);
+
+        if (s.isEmpty() || s.length() % 2 != 0) //verificar si el string es vacio
+        {
+            throw new IllegalArgumentException("The string is empty or null, invalid hexadecimal");
+        }
+        // Verificar si cada carácter es un dígito hexadecimal válido
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i); 
+            if (!isDigitHexadecimal(c)) {
+                throw new IllegalArgumentException("The string is not hexadecimal");
+            }
+        }
+        return hex2byte(s, CHARSET);
+      
     }
+    
+    public static boolean isDigitHexadecimal(char c) {
+        return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+    }
+
     /**
      * Converts a hex string into a byte array
      * @param s source string (with Hex representation)
