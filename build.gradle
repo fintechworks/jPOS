@@ -1,7 +1,12 @@
 import org.gradle.internal.os.OperatingSystem
+plugins {
+    id "com.jfrog.artifactory" version "4.29.0"
+}
+
 apply from: 'jpos/libraries.gradle'
 
 evaluate(new File("${project.projectDir}/VERSION"))
+artifactoryPublish.skip = true
 
 allprojects {
     apply plugin: 'idea'
@@ -11,10 +16,11 @@ allprojects {
 subprojects {
     apply plugin: 'java-library'
     apply plugin: 'maven-publish'
+    apply plugin: 'com.jfrog.artifactory'
     apply plugin: 'signing'
     apply plugin: 'project-report'
 
-    group = 'org.jpos'
+    group = 'org.jpos.fintech'
     version = binding.variables.get("PROJECT_VERSION") ?: "0.0.1"
     [ compileJava, compileTestJava, javadoc ]*.options*.encoding = 'UTF-8'
     def isSnapshot = version.contains("SNAPSHOT")
@@ -91,7 +97,7 @@ subprojects {
                         }
                     }
                 }
-                groupId = 'org.jpos'
+                groupId = 'org.jpos.fintech'
                 artifactId = 'jpos'
                 from components.java
             }
@@ -113,10 +119,34 @@ subprojects {
         }
     }
 
-    signing {
-        required { !isSnapshot }
-        sign publishing.publications.mavenJava
+    artifactory {
+        contextUrl = "${artifactory_url}"
+
+        publish {
+            repository {
+                repoKey = 'libs-release-local'
+                username = "${artifactory_user}"
+                password = "${artifactory_password}"
+            }
+
+            defaults {
+                publications 'mavenJava'
+                publishBuildInfo = true
+                publishArtifacts = true
+                publishPom = true
+                publishIvy = false
+            }
+        }
+
+        clientConfig.includeEnvVars = false
+        clientConfig.envVarsExcludePatterns = '*pwd*,*password*,*PWD*,*PASSWORD*,*Password,*secret*,*SECRET*,*key*,*KEY*,sonar.login'
+        clientConfig.info.buildNumber = version
     }
+
+    //signing {
+        //required { !isSnapshot }
+        //sign publishing.publications.mavenJava
+    //}
 
     javadoc {
         configure(options) {
