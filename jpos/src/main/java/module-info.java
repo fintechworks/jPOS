@@ -12,11 +12,15 @@ module org.jpos.jpos {
     requires com.sleepycat.je;
     requires org.jdbm;
     requires org.bouncycastle.pg;
-    requires org.bouncycastle.lts.prov;
     requires jdk.httpserver;
     requires micrometer.core;
     requires micrometer.registry.prometheus;
-    requires org.apache.sshd;
+    requires org.apache.sshd.core;
+    requires com.fasterxml.jackson.annotation;
+    requires com.fasterxml.jackson.databind;
+    requires com.fasterxml.jackson.datatype.jsr310;
+    requires com.fasterxml.jackson.dataformat.xml;
+    requires org.bouncycastle.provider;
     //    requires net.i2p.crypto.eddsa;
 
     exports org.jpos.iso.packager;
@@ -45,6 +49,13 @@ module org.jpos.jpos {
     exports org.jpos.core;
     exports org.jpos.core.handlers.exception;
     exports org.jpos.rc;
+    exports org.jpos.log;
+    exports org.jpos.log.render.xml;
+    exports org.jpos.log.render.json;
+    exports org.jpos.log.render.markdown;
+    exports org.jpos.log.evt;
+    exports org.jpos.core.annotation;
 
     uses org.jpos.core.EnvironmentProvider;
+    uses org.jpos.log.LogRenderer;
 }

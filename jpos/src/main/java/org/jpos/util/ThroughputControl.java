@@ -47,16 +47,16 @@ public class ThroughputControl {
     private long[] sleep;
 
     /**
-     * @param maxTransactions ditto
-     * @param periodInMillis ditto
+     * @param maxTransactions Transaction count threshold.
+     * @param periodInMillis Time window, expressed in milliseconds.
      */
     public ThroughputControl (int maxTransactions, int periodInMillis) {
         this (new int[] { maxTransactions },
               new int[] { periodInMillis });
     }
     /**
-     * @param maxTransactions ditto
-     * @param periodInMillis ditto
+     * @param maxTransactions An array with transaction count thresholds.
+     * @param periodInMillis An array of time windows, expressed in milliseconds.
      */
     public ThroughputControl (int[] maxTransactions, int[] periodInMillis) {
         super();
@@ -75,10 +75,11 @@ public class ThroughputControl {
     }
 
     /**
-     * control should be called on every transaction.
-     * it may sleep for a while in order to control the system throughput
+     * This method should be called on every transaction.
+     * It will pause the thread for a while when the threshold is reached 
+     * in order to control the process throughput.
      * 
-     * @return aprox sleep time or zero if no sleep
+     * @return Returns sleep time in milliseconds when threshold is reached. Otherwise, zero.
      */
     public long control() {
         boolean delayed = false;
@@ -106,6 +107,22 @@ public class ThroughputControl {
             } while (cnt[i] > max[i]);
         }
         return delayed ? Instant.now().toEpochMilli() - init : 0L;
+    }
+
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder("ThroughputControl [");
+        for (int i = 0; i < max.length; i++) {
+            sb.append(String.format(
+                "%d: max = %d, period = %dms",
+                i, max[i], period[i]
+            ));
+            if (i < max.length - 1) {
+                sb.append("; ");
+            }
+        }
+        sb.append("]");
+        return sb.toString();
     }
 }
 

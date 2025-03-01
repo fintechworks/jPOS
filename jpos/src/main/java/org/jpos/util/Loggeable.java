@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,6 +18,9 @@
 
 package org.jpos.util;
 
+import org.jpos.log.LogRenderer;
+import org.jpos.log.LogRendererRegistry;
+
 import java.io.PrintStream;
 
 /**
@@ -26,5 +29,11 @@ import java.io.PrintStream;
  */
 public interface Loggeable {
     void dump(PrintStream p, String indent);
+    default void dump(PrintStream p, String indent, LogRenderer.Type type) {
+        var renderer = LogRendererRegistry.getRenderer(this.getClass(), type);
+        if (renderer != null)
+            renderer.render (this, p, indent);
+        else
+            dump (p, indent);
+    }
 }
-

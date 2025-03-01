@@ -3,7 +3,6 @@ plugins {
     id "com.jfrog.artifactory" version "4.29.0"
 }
 
-apply from: 'jpos/libraries.gradle'
 
 evaluate(new File("${project.projectDir}/VERSION"))
 artifactoryPublish.skip = true
@@ -31,16 +30,17 @@ subprojects {
     javadoc.failOnError = false
 
     java {
-       sourceCompatibility = JavaVersion.VERSION_21
-       targetCompatibility = JavaVersion.VERSION_21
+       sourceCompatibility = JavaVersion.VERSION_23
+       targetCompatibility = JavaVersion.VERSION_23
     }
 
     tasks.withType(JavaCompile) {
-        options.compilerArgs += '--enable-preview'
+        // options.compilerArgs += '--enable-preview'
+        options.release = JavaVersion.VERSION_23.ordinal()
     }
-    tasks.withType(Test) {
-        jvmArgs += '--enable-preview'
-    }
+    //tasks.withType(Test) {
+    //    jvmArgs += '--enable-preview'
+    //}
 
     repositories {
         mavenCentral()
@@ -49,7 +49,7 @@ subprojects {
     if (project.hasProperty("lint")) {
       // gradle -Plint ...
       tasks.withType(JavaCompile) {
-        options.compilerArgs << "-Xlint:preview" 
+        options.compilerArgs << "-Xlint:preview" << "-Xlint:unchecked" << "-Xlint:deprecation"
       } 
     }
     java {

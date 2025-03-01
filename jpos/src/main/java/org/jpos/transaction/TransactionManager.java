@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,7 +18,9 @@
 
 package org.jpos.transaction;
 
-import io.micrometer.core.instrument.*;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.binder.BaseUnits;
@@ -28,6 +30,7 @@ import org.HdrHistogram.AtomicHistogram;
 import org.jdom2.Element;
 import org.jpos.core.Configuration;
 import org.jpos.core.ConfigurationException;
+import org.jpos.log.evt.Txn;
 import org.jpos.metrics.MeterInfo;
 import org.jpos.function.TriConsumer;
 import org.jpos.function.TriFunction;
@@ -49,6 +52,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.jpos.iso.ISOUtil;
 import org.jpos.util.Metrics;
@@ -60,12 +66,9 @@ public class TransactionManager
     extends QBeanSupport 
     implements Runnable, TransactionConstants, TransactionManagerMBean, Loggeable, MetricsProvider
 {
-    public static final String  HEAD       = "$HEAD";
-    public static final String  TAIL       = "$TAIL";
     public static final String  CONTEXT    = "$CONTEXT.";
     public static final String  STATE      = "$STATE.";
     public static final String  GROUPS     = "$GROUPS.";
-    public static final String  TAILLOCK   = "$TAILLOCK";
     public static final String  RETRY_QUEUE = "$RETRY_QUEUE";
     public static final Integer PREPARING  = 0;
     public static final Integer COMMITTING = 1;
@@ -86,12 +89,9 @@ public class TransactionManager
     private Space<String,Object> isp;  // real input space
     private Space<String,Object> iisp; // internal input space
     private String queue;
-    private String tailLock;
+    private Lock tailLock = new ReentrantLock();
     private final List<TransactionStatusListener> statusListeners = new ArrayList<>();
     private boolean hasStatusListeners;
-    private boolean debug;
-    private boolean debugContext;
-    private boolean profiler;
     private boolean doRecover;
     private boolean callSelectorOnAbort;
     private boolean abortOnMisconfiguredGroups;
@@ -102,7 +102,9 @@ public class TransactionManager
     private final AtomicInteger activeSessions = new AtomicInteger();
     private final AtomicInteger pausedSessions = new AtomicInteger();
 
-    private volatile long head, tail;
+    private final AtomicLong head = new AtomicLong();
+    private final AtomicLong tail = new AtomicLong();
+
     private long retryInterval = 5000L;
     private long retryTimeout  = 60000L;
     private long pauseTimeout  = 60000L;
@@ -115,6 +117,8 @@ public class TransactionManager
 
     private Gauge activeSessionsGauge;
     private Counter transactionCounter;
+    private boolean freezeLog;
+    private UUID uuid = UUID.randomUUID();
 
     @Override
     public void initService () throws ConfigurationException {
@@ -124,19 +128,15 @@ public class TransactionManager
         sp  = SpaceFactory.getSpace (cfg.get ("space"));
         isp = iisp = SpaceFactory.getSpace (cfg.get ("input-space", cfg.get ("space")));
         psp  = SpaceFactory.getSpace (cfg.get ("persistent-space", this.toString()));
-        tail = initCounter (TAIL, cfg.getLong ("initial-tail", 1));
-        head = Math.max (initCounter (HEAD, tail), tail);
-        initTailLock ();
+        doRecover = cfg.getBoolean ("recover", psp instanceof PersistentSpace);
 
+        tail.set(cfg.getLong ("initial-tail", 1));
+        head.set(tail.get());
         groups = new HashMap<>();
         initParticipants (getPersist());
         initStatusListeners (getPersist());
-        executor = Executors.newThreadPerTaskExecutor(
-          Thread.ofVirtual()
-          .inheritInheritableThreadLocals(false)
-          .name(getName())
-          .factory());
-
+        executor = QFactory.executorService(cfg.getBoolean("virtual-threads", true));
+        
         if (!filtersAdded.getAndSet(true)) {
             getServer().getMeterRegistry().config().meterFilter(new MeterFilter() {
                 @Override
@@ -237,8 +237,8 @@ public class TransactionManager
                     });
                 }
                 else {
-                    ISOUtil.sleep(100L);
                     iisp.push(queue, context);  // push it back
+                    ISOUtil.sleep(100L);
                 }
             }
         }
@@ -257,8 +257,10 @@ public class TransactionManager
         evt = null;
         thread.setName (getName() + "-" + session + ":idle");
         int action = -1;
-        id = nextId ();
+        id = head.getAndIncrement ();
         TMEvent tme = new TMEvent(getName(), id);
+        Txn txn = new Txn(getName(), id);
+
         tme.begin();
         try {
             setThreadLocal(id, context);
@@ -270,16 +272,12 @@ public class TransactionManager
             abort = false;
             members = new ArrayList<> ();
             iter = getParticipants (DEFAULT_GROUP).iterator();
-            if (debug) {
-                evt = getLog().createLogEvent(
-                  "debug",
-                  "%s:%d".formatted(Thread.currentThread().getName(), id)
-                );
-                if (debugContext) {
-                    evt.addMessage (context);
-                }
-                prof = new Profiler();
-            }
+            evt = new LogEvent()
+              .withSource(log)
+              .withTraceId(getTraceId(id));
+            evt.addMessage(txn);
+            evt.addMessage(context);
+            prof = new Profiler();
             snapshot (id, context, PREPARING);
             action = prepare (session, id, context, members, iter, abort, evt, prof, chronometer);
             switch (action) {
@@ -302,7 +300,7 @@ public class TransactionManager
                     break;
             }
             snapshot (id, null, DONE);
-            if (id == tail) {
+            if (id == tail.get()) {
                 checkTail ();
             } else {
                 purge (id, false);
@@ -355,27 +353,21 @@ public class TransactionManager
 
     @Override
     public long getTail () {
-        return tail;
+        return tail.get();
     }
 
     @Override
     public long getHead () {
-        return head;
+        return head.get();
     }
 
     public long getInTransit () {
-        return head - tail;
+        return head.get() - tail.get();
     }
 
     @Override
     public void setConfiguration (Configuration cfg) throws ConfigurationException {
         super.setConfiguration (cfg);
-        debug = cfg.getBoolean ("debug", true);
-        debugContext = cfg.getBoolean ("debug-context", debug);
-        profiler = cfg.getBoolean ("profiler", debug); 
-        if (profiler || debugContext)
-            debug = true; // profiler and/or debugContext needs debug
-        doRecover = cfg.getBoolean ("recover", true);
         retryInterval = cfg.getLong ("retry-interval", retryInterval);
         retryTimeout  = cfg.getLong ("retry-timeout", retryTimeout);
         pauseTimeout  = cfg.getLong ("pause-timeout", pauseTimeout);
@@ -394,8 +386,7 @@ public class TransactionManager
                 throw new ConfigurationException("max-active-sessions < max-sessions");
         }
         callSelectorOnAbort = cfg.getBoolean("call-selector-on-abort", true);
-        if (profiler)
-            metrics = new Metrics(new AtomicHistogram(cfg.getLong("metrics-highest-trackable-value", 60000), 2));
+        metrics = new Metrics(new AtomicHistogram(cfg.getLong("metrics-highest-trackable-value", 60000), 2));
         abortOnMisconfiguredGroups = cfg.getBoolean("abort-on-misconfigured-groups");
 
         try {
@@ -410,6 +401,7 @@ public class TransactionManager
         } catch (Exception e) {
             throw new ConfigurationException (e);
         }
+        freezeLog = cfg.getBoolean("freeze-log", true);
     }
     public void addListener (TransactionStatusListener l) {
         synchronized (statusListeners) {
@@ -480,7 +472,7 @@ public class TransactionManager
             if (recover && p instanceof ContextRecovery cr) {
                 context = recover (cr, id, context, pp, true);
                 if (evt != null)
-                    evt.addMessage (" commit-recover: " + getName(p));
+                    evt.addMessage (Trace.of("commit-recover", getName(p)));
             }
             if (hasStatusListeners)
                 notifyStatusListeners (
@@ -488,7 +480,7 @@ public class TransactionManager
                 );
             commitOrAbort (p, id, context, pp, this::commit);
             if (evt != null) {
-                evt.addMessage ("         commit: " + getName(p));
+                evt.addMessage (Trace.of("commit", getName(p)));
                 if (prof != null)
                     prof.checkPoint (" commit: " + getName(p));
             }
@@ -503,7 +495,7 @@ public class TransactionManager
             if (recover && p instanceof ContextRecovery cr) {
                 context = recover (cr, id, context, pp, true);
                 if (evt != null)
-                    evt.addMessage ("  abort-recover: " + getName(p));
+                    evt.addMessage (Trace.of("abort-recover", getName(p)));
             }
             if (hasStatusListeners)
                 notifyStatusListeners (
@@ -512,7 +504,7 @@ public class TransactionManager
 
             commitOrAbort (p, id, context, pp, this::abort);
             if (evt != null) {
-                evt.addMessage ("          abort: " + getName(p));
+                evt.addMessage (Trace.of("abort", getName(p)));
                 if (prof != null)
                     prof.checkPoint ("  abort: " + getName(p));
             }
@@ -528,7 +520,7 @@ public class TransactionManager
                 return ((AbortParticipant)p).prepareForAbort (id, context);
             }
         } catch (Throwable t) {
-            getLog().warn ("PREPARE-FOR-ABORT: " + Long.toString (id), t);
+            getLog().warn ("PREPARE-FOR-ABORT: " + id, t);
         } finally {
             getParams(p).timers.prepareForAbortTimer.record (c.elapsed(), TimeUnit.MILLISECONDS);
             if (metrics != null)
@@ -544,7 +536,7 @@ public class TransactionManager
             setThreadName(id, "prepare", p);
             return p.prepare (id, context);
         } catch (Throwable t) {
-            getLog().warn ("PREPARE: " + Long.toString (id), t);
+            getLog().warn ("PREPARE: " + id, t);
         } finally {
             getParams(p).timers.prepareTimer.record (c.elapsed(), TimeUnit.MILLISECONDS);
             if (metrics != null) {
@@ -561,7 +553,7 @@ public class TransactionManager
             setThreadName(id, "commit", p);
             p.commit(id, context);
         } catch (Throwable t) {
-            getLog().warn ("COMMIT: " + Long.toString (id), t);
+            getLog().warn ("COMMIT: " + id, t);
         } finally {
             getParams(p).timers.commitTimer.record (c.elapsed(), TimeUnit.MILLISECONDS);
             if (metrics != null)
@@ -616,7 +608,7 @@ public class TransactionManager
                 action = prepareOrAbort (p, id, context, pp, this::prepareForAbort);
 
                 if (evt != null && p instanceof AbortParticipant) {
-                    evt.addMessage("prepareForAbort: " + getName(p));
+                    evt.addMessage(Trace.of("prepareForAbort", getName(p)));
                     if (prof != null)
                         prof.checkPoint ("prepareForAbort: " + getName(p));
                 }
@@ -640,14 +632,14 @@ public class TransactionManager
                 retry  = (action & RETRY) == RETRY;
 
                 if (evt != null) {
-                    evt.addMessage ("        prepare: "
-                            + getName(p)
-                            + (abort ? " ABORTED" : " PREPARED")
+                    evt.addMessage (Trace.of("prepare", getName(p),
+                            (abort ? " ABORTED" : " PREPARED")
                             + (timeout ? " TIMEOUT" : "")
                             + (maxTime ? " MAX_TIMEOUT" : "")
                             + (retry ? " RETRY" : "")
                             + ((action & READONLY) == READONLY ? " READONLY" : "")
-                            + ((action & NO_JOIN) == NO_JOIN ? " NO_JOIN" : ""));
+                            + ((action & NO_JOIN) == NO_JOIN ? " NO_JOIN" : ""))
+                    );
                     if (prof != null)
                         prof.checkPoint ("prepare: " + getName(p));
                 }
@@ -713,7 +705,7 @@ public class TransactionManager
     protected List<TransactionParticipant> getParticipants (long id) {
     	// Use a local copy of participant to avoid adding the 
         // GROUP participant to the DEFAULT_GROUP
-    	List<TransactionParticipant> participantsChain = new ArrayList();
+    	List<TransactionParticipant> participantsChain = new ArrayList<>();
         List<TransactionParticipant> participants = getParticipants (DEFAULT_GROUP);
         // Add DEFAULT_GROUP participants 
         participantsChain.addAll(participants);
@@ -770,9 +762,7 @@ public class TransactionManager
         throws ConfigurationException
     {
         QFactory factory = getFactory();
-        TransactionParticipant participant =
-            factory.newInstance (QFactory.getAttributeValue (e, "class")
-        );
+        TransactionParticipant participant = factory.newInstance (QFactory.getAttributeValue (e, "class"));
         factory.setLogger (participant, e);
         QFactory.invoke (participant, "setTransactionManager", this, TransactionManager.class);
         factory.setConfiguration (participant, e);
@@ -812,14 +802,6 @@ public class TransactionManager
         sb.append (id);
         return sb.toString ();
     }
-    protected long initCounter (String name, long defValue) {
-        Long L = (Long) psp.rdp (name);
-        if (L == null) {
-            L = defValue;
-            psp.out (name, L);
-        }
-        return L;
-    }
     protected void commitOff (Space sp) {
         if (sp instanceof JDBMSpace jsp) {
             jsp.setAutoCommit(false);
@@ -831,50 +813,31 @@ public class TransactionManager
             jsp.setAutoCommit(true);
         }
     }
-    protected void syncTail () {
-        synchronized (psp) {
-            commitOff (psp);
-            psp.inp (TAIL);
-            psp.out (TAIL, tail);
-            commitOn (psp);
-        }
-    }
-    protected void initTailLock () {
-        tailLock = TAILLOCK + "." + Integer.toString (this.hashCode());
-        sp.put (tailLock, TAILLOCK);
-    }
     protected void checkTail () {
-        Object lock = sp.in (tailLock);
-        while (tailDone()) {
-            tail++;
-            Thread.yield();
+        tailLock.lock();
+        try {
+            while (tailDone()) {
+                tail.incrementAndGet();
+            }
+        } finally {
+            tailLock.unlock();
         }
-        syncTail ();
-        sp.out(tailLock, lock);
     }
     protected boolean tailDone () {
-        String stateKey = getKey(STATE, tail);
+        String stateKey = getKey(STATE, tail.get());
         if (DONE.equals (psp.rdp (stateKey))) {
-            purge (tail, true);
+            purge (tail.get(), true);
             return true;
         }
         return false;
-    }
-    protected long nextId () {
-        long h;
-        synchronized (psp) {
-            commitOff (psp);
-            psp.in  (HEAD);
-            h = head;
-            psp.out (HEAD, ++head);
-            commitOn (psp);
-        }
-        return h;
     }
     protected void snapshot (long id, Serializable context) {
         snapshot (id, context, null);
     }
     protected void snapshot (long id, Serializable context, Integer status) {
+        if (!doRecover && status != DONE)
+            return; // nothing to do
+
         var jfr = new TMEvent.Snapshot(getName()+":"+status, id);
         jfr.begin();
 
@@ -923,17 +886,15 @@ public class TransactionManager
 
     protected void recover () {
         if (doRecover) {
-            if (tail < head) {
-                getLog().info ("recover - tail=" +tail+", head="+head);
+            if (tail.get() < head.get()) {
+                getLog().info ("recover - tail=" +tail.get()+", head="+head.get());
             }
-            while (tail < head) {
-                recover (0, tail++);
+            while (tail.get() < head.get()) {
+                recover (tail.getAndIncrement());
             }
-        } else
-            tail = head;
-        syncTail ();
+        }
     }
-    protected void recover (int session, long id) {
+    protected void recover (long id) {
         LogEvent evt = getLog().createLogEvent ("recover");
         Profiler prof = new Profiler();
         evt.addMessage ("<id>" + id + "</id>");
@@ -953,9 +914,9 @@ public class TransactionManager
             if (DONE.equals (state)) {
                 evt.addMessage ("<done/>");
             } else if (COMMITTING.equals (state)) {
-                commit (session, id, context, getParticipants (id), true, evt, prof);
+                commit (0, id, context, getParticipants (id), true, evt, prof);
             } else if (PREPARING.equals (state)) {
-                abort (session, id, context, getParticipants (id), true, evt, prof);
+                abort (0, id, context, getParticipants (id), true, evt, prof);
             }
             purge (id, true);
         } finally {
@@ -980,8 +941,8 @@ public class TransactionManager
      * @param prof profiler (may be null)
      * @return FrozenLogEvent
      */
-    protected FrozenLogEvent freeze(Serializable context, LogEvent evt, Profiler prof) {
-        return new FrozenLogEvent(evt);
+    protected LogEvent freeze(Serializable context, LogEvent evt, Profiler prof) {
+        return freezeLog ? new FrozenLogEvent(evt) : evt;
     }
 
     public class RetryTask implements Runnable {
@@ -1026,26 +987,6 @@ public class TransactionManager
         }
     }
 
-    @Override
-    public void setDebug (boolean debug) {
-        this.debug = debug;
-    }
-
-    @Override
-    public boolean getDebugContext() {
-        return debugContext;
-    }
-
-    @Override
-    public void setDebugContext (boolean debugContext) {
-        this.debugContext = debugContext;
-    }
-
-    @Override
-    public boolean getDebug() {
-        return debug;
-    }
-
     /**
      * This method returns the number of sessions that can be started at this point in time
      * @return number of sessions
@@ -1084,6 +1025,8 @@ public class TransactionManager
     public static Long getId() {
         return tlId.get();
     }
+
+
     private void notifyStatusListeners
             (int session, TransactionStatusEvent.State state, long id, String info, Serializable context)
     {
@@ -1110,11 +1053,11 @@ public class TransactionManager
     }
 
     private String getName(TransactionParticipant p) {
-        return getParams(p).name();
+        return p.getClass().getName();
     }
 
     private ParticipantParams getParams (TransactionParticipant p) {
-        return Optional.ofNullable(params.get(p)).orElse(
+        return Optional.ofNullable(params.get(p)).orElseGet(() ->
           new ParticipantParams(p.getClass().getName(), 0L, 0L, Collections.emptySet(), Collections.emptySet(), Collections.emptySet(),
             getOrCreateTimers(p))
         );
@@ -1122,7 +1065,7 @@ public class TransactionManager
 
     private String tmInfo() {
         return String.format ("in-transit=%d, head=%d, tail=%d, paused=%d, outstanding=%d, active-sessions=%d/%d%s",
-          getInTransit(), head, tail, pausedSessions.get(), getOutstandingTransactions(),
+          getInTransit(), head.get(), tail.get(), pausedSessions.get(), getOutstandingTransactions(),
           getActiveSessions(), maxSessions,
           (tps != null ? ", " + tps : "")
         );
@@ -1194,6 +1137,18 @@ public class TransactionManager
         io.micrometer.core.instrument.Timer abortTimer,
         io.micrometer.core.instrument.Timer snapshotTimer)
     { }
+    public record Trace (String phase, String message, String info) {
+        @Override
+        public String toString() {
+            return "%15s: %s%s".formatted(phase, message, info);
+        }
+        public static Trace of (String phase, String message) {
+            return new Trace (phase, message, "");
+        }
+        public static Trace of (String phase, String message, String info) {
+            return new Trace (phase, message, info);
+        }
+    }
 
     private Set<String> getSet (Element e) {
         return e != null ? new HashSet<>(Arrays.asList(ISOUtil.commaDecode(e.getTextTrim()))) : Collections.emptySet();
@@ -1251,8 +1206,8 @@ public class TransactionManager
     }
 
     private Timers getOrCreateTimers(TransactionParticipant p) {
-        var mr = getServer().getMeterRegistry();
         String participantShortName = Caller.shortClassName(p.getClass().getName());
+        var mr = getServer().getMeterRegistry();
         var tags = Tags.of("name", getName(), "participant", participantShortName);
         if (p instanceof LogSource ls) {
             String realm = ls.getRealm();
@@ -1271,5 +1226,9 @@ public class TransactionManager
     private Timer addTimer (Timer m) {
         meters.add (m);
         return m;
+    }
+
+    private UUID getTraceId (long transactionId) {
+        return new UUID(uuid.getMostSignificantBits(), uuid.getLeastSignificantBits() ^ transactionId);
     }
 }

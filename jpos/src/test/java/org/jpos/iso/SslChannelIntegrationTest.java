@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,9 +38,7 @@ import org.jpos.iso.channel.XMLChannel;
 import org.jpos.iso.packager.XMLPackager;
 import org.jpos.util.Logger;
 import org.jpos.util.SimpleLogListener;
-import org.jpos.util.ThreadPool;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -84,7 +82,7 @@ public class SslChannelIntegrationTest {
 
         isoServer.shutdown();
 
-        assertThrows(SocketTimeoutException.class, () -> {
+        assertThrows(EOFException.class, () -> {
             clientChannel.receive();
         }, "clientChannel should be closed");
     }

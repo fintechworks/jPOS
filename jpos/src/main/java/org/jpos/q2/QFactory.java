@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -39,6 +39,8 @@ import java.util.List;
 import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 import java.util.StringTokenizer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * @author <a href="mailto:taherkordy@dpi2.dpi.net.ir">Alireza Taherkordi</a>
@@ -432,16 +434,26 @@ public class QFactory {
             );
         }
     }
-
-    public static boolean isEnabled (Element e) {
-        String enabledAttribute = getEnabledAttribute(e);
-        return "true".equalsIgnoreCase(enabledAttribute) ||
-          "yes".equalsIgnoreCase(enabledAttribute) ||
-          enabledAttribute.contains(Environment.getEnvironment().getName());
+    public static boolean isEnabled(Element e) {
+        return isTrue(getEnabledAttribute(e));
+    }
+    public static boolean isEagerStart(Element e) {
+        return isTrue(getEagerStartAttribute(e));
+    }
+    private static boolean isTrue(String attribute) {
+        return "true".equalsIgnoreCase(attribute) ||
+          "yes".equalsIgnoreCase(attribute) ||
+          attribute.contains(Environment.getEnvironment().getName());
     }
 
     public static String getEnabledAttribute (Element e) {
-       return Environment.get(e.getAttributeValue("enabled", "true"));
+        return getAttribute(e, "enabled", "true");
+    }
+    public static String getEagerStartAttribute (Element e) {
+        return getAttribute(e, "eager-start", "false");
+    }
+    private static String getAttribute (Element e, String attr, String def) {
+        return Environment.get(e.getAttributeValue(attr, def));
     }
 
     @SuppressWarnings("rawtypes")
@@ -467,6 +479,8 @@ public class QFactory {
                             field.set(obj, cfg.getDouble(config.value()));
                         else if (c.isAssignableFrom(boolean.class) || c.isAssignableFrom(Boolean.class))
                             field.set(obj, cfg.getBoolean(config.value()));
+                        else if (c.isEnum()) 
+                            field.set(obj, Enum.valueOf((Class<Enum>) c, v));
                         else if (c.isArray()) {
                             Class<?> ct = c.getComponentType();
                             if (ct.isAssignableFrom(String.class))
@@ -493,6 +507,15 @@ public class QFactory {
     public static Element expandEnvProperties(Element e) {
        expandEnvProperties(e, Environment.getEnvironment());
        return e;
+    }
+
+    public static ExecutorService executorService(boolean virtual) {
+        return virtual ?
+            Executors.newVirtualThreadPerTaskExecutor() :
+            Executors.newThreadPerTaskExecutor(
+              Thread.ofPlatform().inheritInheritableThreadLocals(true)
+                .factory()
+            );
     }
 
     /**

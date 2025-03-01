@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -675,7 +675,7 @@ public class JCESecurityModule extends BaseSMAdapter<SecureDESKey> {
      * </ul>
      * @param pan application primary account number
      * @param psn PAN Sequence Number
-     * @return 8-bytes representing first 16 digits
+     * @return 8-bytes representing rightmost 16 digits
      */
     private static byte[] formatPANPSNOptionA(String pan, String psn){
         if ( pan.length() < 14 )

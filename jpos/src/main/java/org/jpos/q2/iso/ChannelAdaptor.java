@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,12 +18,19 @@
 
 package org.jpos.q2.iso;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.binder.BaseUnits;
 import org.jdom2.Element;
 import org.jpos.core.ConfigurationException;
 import org.jpos.core.Environment;
+import org.jpos.core.annotation.Config;
 import org.jpos.core.handlers.exception.ExceptionHandlerAware;
 import org.jpos.core.handlers.exception.ExceptionHandlerConfigAware;
 import org.jpos.iso.*;
+import org.jpos.metrics.MeterFactory;
+import org.jpos.metrics.MeterInfo;
 import org.jpos.q2.QBeanSupport;
 import org.jpos.q2.QFactory;
 import org.jpos.space.Space;
@@ -37,7 +44,14 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.SocketTimeoutException;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.Date;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @author Alejandro Revilla
@@ -62,24 +76,37 @@ public class ChannelAdaptor
     private Thread sender;
     private final Object disconnectLock = Boolean.TRUE;
 
+    private ExecutorService executor;
+    private ScheduledExecutorService scheduledExecutor;
+
+    private Gauge connectionsGauge;
+
+    private Counter msgOutCounter;
+    private Counter msgInCounter;
+    @Config("soft-stop") private long softStop;
+
     public ChannelAdaptor () {
         super ();
         resetCounters();
     }
-    
     public void initService() throws ConfigurationException {
+        if (softStop < 0)
+            throw new ConfigurationException ("Invalid soft-stop %d".formatted(Long.valueOf(softStop)));
         initSpaceAndQueues();
         NameRegistrar.register (getName(), this);
+        executor = QFactory.executorService(cfg.getBoolean("virtual-threads", false));
+        scheduledExecutor = Executors.newSingleThreadScheduledExecutor(
+            Thread.ofVirtual().factory()
+        );
     }
     public void startService () {
         try {
             channel = initChannel ();
-            sender = new Thread(new Sender());
-            sender.start();
+            executor.submit(new Sender());
             if (!writeOnly) { // fixes #426 && jPOS-20
-                receiver = new Thread(new Receiver());
-                receiver.start();
+                executor.submit (new Receiver());
             }
+            initMeters();
         } catch (Exception e) {
             getLog().warn ("error starting service", e);
         }
@@ -87,33 +114,20 @@ public class ChannelAdaptor
     public void stopService () {
         try {
             sp.out (in, Boolean.TRUE);
-            if (channel != null)
-                disconnect();
-            if (waitForWorkersOnStop) {
-                waitForSenderToExit();
-                if (!writeOnly) {
-                    sp.out(ready, new Date());
-                    waitForReceiverToExit();
-                }
+            if (channel != null) {
+                if (softStop > 0L)
+                    disconnectLater(softStop);
+                else
+                    disconnect();
             }
+            if (waitForWorkersOnStop)
+                executor.awaitTermination(Math.max(5000L, softStop), TimeUnit.MILLISECONDS);
             sender = null;
             receiver = null;
+            removeMeters();
         } catch (Exception e) {
             getLog().warn ("error disconnecting from remote host", e);
         }
-    }
-    private void waitForSenderToExit() {
-        join(sender);
-    }
-    private void waitForReceiverToExit() {
-        join(receiver);
-        SpaceUtil.wipe(sp, ready);
-    }
-    private void join(Thread thread) {
-        try {
-            if (thread != null)
-                thread.join();
-        } catch (InterruptedException ignored) { }
     }
     public void destroyService () {
         NameRegistrar.unregister (getName ());
@@ -289,29 +303,43 @@ public class ChannelAdaptor
         }
         public void run () {
             Thread.currentThread().setName ("channel-sender-" + in);
-            while (running ()){
+
+            while (running()){
                 try {
                     checkConnection ();
                     if (!running())
                         break;
                     Object o = sp.in (in, delay);
                     if (o instanceof ISOMsg) {
+                        if (!channel.isConnected()) {
+                            // push back the message so it can be handled by another channel adaptor
+                            sp.push(in, o);
+                            continue;
+                        }
                         channel.send ((ISOMsg) o);
                         tx++;
+                    } else if (o instanceof Integer) {
+                        if ((int)o != hashCode()) {
+                            // STOP indicator seems to be for another channel adaptor
+                            // sharing the same queue push it back and allow the companion
+                            // channel to get it
+                            sp.push (in, o, 500L);
+                            ISOUtil.sleep (1000L); // larger sleep so that the indicator has time to timeout
+                        }
                     }
                     else if (keepAlive && channel.isConnected() && channel instanceof BaseChannel) {
                         ((BaseChannel)channel).sendKeepAlive();
                     }
                 } catch (ISOFilter.VetoException e) { 
-                    getLog().warn ("channel-sender-"+in, e.getMessage ());
+                    // getLog().warn ("channel-sender-"+in, e.getMessage ());
                 } catch (ISOException e) {
-                    getLog().warn ("channel-sender-"+in, e.getMessage ());
+                    // getLog().warn ("channel-sender-"+in, e.getMessage ());
                     if (!ignoreISOExceptions) {
                         disconnect ();
                     }
                     ISOUtil.sleep (1000); // slow down on errors
                 } catch (Exception e) { 
-                    getLog().warn ("channel-sender-"+in, e.getMessage ());
+                    // getLog().warn ("channel-sender-"+in, e.getMessage ());
                     disconnect ();
                     ISOUtil.sleep (1000);
                 }
@@ -325,12 +353,32 @@ public class ChannelAdaptor
         }
         public void run () {
             Thread.currentThread().setName ("channel-receiver-"+out);
-            while (running()) {
+            boolean shuttingDown = false;
+            Instant shutdownDeadline = null;
+            final Duration gracePeriod = Duration.ofMillis(softStop);
+            while (true) {
+                if (!shuttingDown && !running()) {
+                    if (gracePeriod.isZero())
+                        break;
+                    shuttingDown = true;
+                    shutdownDeadline = Instant.now().plus(gracePeriod);
+                    getLog().info("soft-stop (%s)".formatted(shutdownDeadline.atZone(ZoneId.systemDefault())));
+                }
+                final boolean shouldExit = shuttingDown
+                  ? Instant.now().isAfter(shutdownDeadline)
+                  : !running();
+
+                if (shouldExit) {
+                    getLog().info ("stop");
+                    break;
+                }
                 try {
                     Object r = sp.rd (ready, 5000L);
-                    if (r == null)
+                    if (r == null) {
                         continue;
+                    }
                     ISOMsg m = channel.receive ();
+                    msgInCounter.increment();
                     rx++;
                     lastTxn = System.currentTimeMillis();
                     if (timeout > 0)
@@ -338,41 +386,40 @@ public class ChannelAdaptor
                     else
                         sp.out (out, m);
                 } catch (ISOFilter.VetoException e) {
-                    getLog().warn ("channel-receiver-"+out+"-veto-exception", e.getMessage());
+                    // getLog().warn ("channel-receiver-"+out+"-veto-exception", e.getMessage());
                 } catch (ISOException e) {
                     if (running()) {
-                        getLog().warn ("channel-receiver-"+out, e);
+                        // getLog().warn ("channel-receiver-"+out, e);
                         if (!ignoreISOExceptions) {
                             sp.out (reconnect, Boolean.TRUE, delay);
                             disconnect ();
-                            sp.out (in, Boolean.TRUE); // wake-up Sender
+                            sp.push (in, hashCode()); // wake-up Sender
                         }
                         ISOUtil.sleep(1000);
                     }
                 } catch (SocketTimeoutException | EOFException e) {
                     if (running()) {
-                        getLog().warn ("channel-receiver-"+out, "Read timeout / EOF - reconnecting");
+                        // getLog().warn ("channel-receiver-"+out, "Read timeout / EOF - reconnecting");
                         sp.out (reconnect, Boolean.TRUE, delay);
                         disconnect ();
-                        sp.out (in, Boolean.TRUE); // wake-up Sender
+                        sp.push (in, hashCode()); // wake-up Sender
                         ISOUtil.sleep(1000);
                     }
                 } catch (Exception e) { 
                     if (running()) {
-                        getLog().warn ("channel-receiver-"+out, e);
+                        // getLog().warn ("channel-receiver-"+out, e);
                         sp.out (reconnect, Boolean.TRUE, delay);
                         disconnect ();
-                        sp.out (in, Boolean.TRUE); // wake-up Sender
+                        sp.push (in, hashCode()); // wake-up Sender
                         ISOUtil.sleep(1000);
                     }
                 }
             }
+            disconnect();
         }
     }
     protected void checkConnection () {
-        while (running() && 
-                sp.rdp (reconnect) != null)
-        {
+        while (running() && sp.rdp (reconnect) != null) {
             ISOUtil.sleep(1000);
         }
         while (running() && !channel.isConnected ()) {
@@ -400,6 +447,10 @@ public class ChannelAdaptor
                 getLog().warn("disconnect", e);
             }
         }
+    }
+    private void disconnectLater(long delayInMillis) {
+         SpaceUtil.wipe(sp, ready);
+         scheduledExecutor.schedule(this::disconnect, delayInMillis, TimeUnit.MILLISECONDS);
     }
     public synchronized void setHost (String host) {
         setProperty (getProperties ("channel"), "host", host);
@@ -435,7 +486,7 @@ public class ChannelAdaptor
         lastTxn = 0l;
     }
     public String getCountersAsString () {
-        StringBuffer sb = new StringBuffer();
+        StringBuilder sb = new StringBuilder();
         append (sb, "tx=", tx);
         append (sb, ", rx=", rx);
         append (sb, ", connects=", connects);
@@ -472,8 +523,28 @@ public class ChannelAdaptor
     protected Space grabSpace (Element e) {
         return SpaceFactory.getSpace (e != null ? e.getText() : "");
     }
-    protected void append (StringBuffer sb, String name, int value) {
+    protected void append (StringBuilder sb, String name, int value) {
         sb.append (name);
         sb.append (value);
+    }
+    private void initMeters() {
+        var tags = Tags.of("name", getName(), "type", "client");
+        var registry = getServer().getMeterRegistry();
+        connectionsGauge =
+          MeterFactory.gauge
+            (registry, MeterInfo.ISOCHANNEL_CONNECTION_COUNT,
+              tags,
+              BaseUnits.THREADS,
+              () -> isConnected() ? 1 : 0
+            );
+
+        msgInCounter = MeterFactory.counter(registry, MeterInfo.ISOMSG_IN, tags);
+        msgOutCounter = MeterFactory.counter(registry, MeterInfo.ISOMSG_OUT, tags);
+    }
+    private void removeMeters() {
+        var registry = getServer().getMeterRegistry();
+        registry.remove(connectionsGauge);
+        registry.remove(msgInCounter);
+        registry.remove(msgOutCounter);
     }
 }

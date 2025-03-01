@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -44,6 +44,8 @@ public class LogEvent {
     private Instant dumpedAt;
     private boolean honorSourceLogger;
     private boolean noArmor;
+    private boolean hasException;
+    private String traceId;
 
     public LogEvent (String tag) {
         super();
@@ -78,6 +80,8 @@ public class LogEvent {
     }
     public void addMessage (Object msg) {
         payLoad.add (msg);
+        if (msg instanceof Throwable)
+            hasException = true;
     }
     public void addMessage (String tagname, String message) {
         payLoad.add ("<"+tagname+">"+message+"</"+tagname+">");
@@ -95,8 +99,7 @@ public class LogEvent {
         if (noArmor) {
             p.println("");
         } else {
-            if (dumpedAt == null)
-                dumpedAt = Instant.now();
+            dumpedAt = getDumpedAt();
             StringBuilder sb = new StringBuilder(indent);
             sb.append ("<log realm=\"");
             sb.append (getRealm());
@@ -108,6 +111,9 @@ public class LogEvent {
                 sb.append (" lifespan=\"");
                 sb.append (elapsed);
                 sb.append ("ms\"");
+            }
+            if (traceId != null) {
+                sb.append (String.format (" trace-id=\"%s\"", traceId));
             }
             sb.append ('>');
             p.println (sb.toString());
@@ -195,6 +201,33 @@ public class LogEvent {
     public String getRealm() {
         return source != null ? source.getRealm() : "";
     }
+    public LogEvent withTraceId (String traceId) {
+        this.traceId = traceId;
+        return this;
+    }
+    public LogEvent withTraceId (UUID uuid) {
+        this.traceId = uuid.toString().replace("-", "");
+        return this;
+    }
+    public LogEvent withSource (LogSource source) {
+        setSource(source);
+        return this;
+    }
+    public LogEvent add (Object o) {
+        addMessage(o);
+        return this;
+    }
+    public LogEvent withTraceId () {
+        getTraceId();
+        return this;
+    }
+    public String getTraceId() {
+        synchronized(getPayLoad()) {
+            if (traceId == null)
+                traceId = UUID.randomUUID().toString().replace("-","");
+            return traceId;
+        }
+    }
 
     /**
      * WARNING: payLoad is a SynchronizedList. If you intend to get a reference
@@ -228,6 +261,9 @@ public class LogEvent {
         return toString("");
     }
 
+    public boolean hasException() {
+        return hasException;
+    }
     /**
      * This is a hack for backward compatibility after accepting PR67
      * @see <a href="https://github.com/jpos/jPOS/pull/67">PR67</a>
@@ -235,5 +271,14 @@ public class LogEvent {
      */
     public boolean isHonorSourceLogger() {
         return honorSourceLogger;
+    }
+
+    public synchronized Instant getDumpedAt() {
+        if (dumpedAt == null)
+            dumpedAt = Instant.now();
+        return dumpedAt;
+    }
+    public Instant getCreatedAt() {
+        return createdAt;
     }
 }

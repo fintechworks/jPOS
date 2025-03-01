@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -19,8 +19,9 @@
 package org.jpos.iso;
 
 import java.lang.ref.WeakReference;
+import java.util.EventObject;
 
-public class ISOServerAcceptEvent extends java.util.EventObject {
+public final class ISOServerAcceptEvent extends EventObject implements ISOServerEvent {
     private WeakReference<ISOChannel> channelRef;
     public ISOServerAcceptEvent(ISOServer source, ISOChannel channel) {
         super(source);

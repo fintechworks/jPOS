@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -15,6 +15,7 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+
 package org.jpos.metrics;
 
 import io.micrometer.core.instrument.Meter;
@@ -36,7 +37,7 @@ public class MeterFactory {
 
     public static Timer timer(MeterRegistry registry, MeterInfo meterInfo, Tags tags) {
         return createMeter(registry, meterInfo, tags,
-          () -> Timer.builder(meterInfo.id()).tags(tags).description(meterInfo.description())
+          () -> Timer.builder(meterInfo.id()).tags(meterInfo.add(tags)).description(meterInfo.description())
             .publishPercentiles(0.5, 0.95)
             .publishPercentileHistogram()
             .minimumExpectedValue(Duration.ofMillis(1))
@@ -46,23 +47,27 @@ public class MeterFactory {
 
     public static Counter counter(MeterRegistry registry, MeterInfo meterInfo, Tags tags) {
         return createMeter(registry, meterInfo, tags,
-          () -> Counter.builder(meterInfo.id()).tags(tags).description(meterInfo.description()).register(registry));
+          () -> Counter.builder(meterInfo.id()).tags(meterInfo.add(tags)).description(meterInfo.description()).register(registry));
     }
 
     public static Gauge gauge(MeterRegistry registry, MeterInfo meterInfo, Tags tags, String unit, Supplier<Number> n) {
         return createMeter(registry, meterInfo, tags,
           () -> Gauge.builder(meterInfo.id(), n)
-            .tags(tags)
+            .tags(meterInfo.add(tags))
             .description(meterInfo.description())
             .baseUnit(unit)
             .register(registry));
+    }
+
+    public static void remove (MeterRegistry registry, Meter meter) {
+        registry.getMeters().remove(meter);
     }
 
     @SuppressWarnings("unchecked")
     private static <T extends Meter> T createMeter(MeterRegistry registry, MeterInfo meterInfo, Tags tags, Callable<T> creator) {
         try {
             metersLock.lock();
-            T meter = (T) Search.in(registry).name(meterInfo.id()).tags(tags).meter();
+            T meter = (T) Search.in(registry).name(meterInfo.id()).tags(meterInfo.add(tags)).meter();
             if (meter == null) {
                 try {
                     meter = creator.call();

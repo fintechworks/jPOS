@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -30,8 +30,12 @@ public class Caller {
     public static String info() {
         return info(1);
     }
+
     public static String info(int pos) {
-        StackTraceElement st = Thread.currentThread().getStackTrace()[2+pos];
+        return info (Thread.currentThread().getStackTrace()[2+pos]);
+    }
+
+    public static String info (StackTraceElement st) {
         String clazz = st.getClassName();
         Matcher matcher = FQCN.matcher(clazz);
         StringBuilder sb = new StringBuilder();
@@ -41,9 +45,11 @@ public class Caller {
         }
         return sb.append(st.getMethodName())
           .append(':')
-          .append(Integer.toString(st.getLineNumber()))
+          .append(st.getLineNumber())
           .toString();
     }
+
+
     public static String shortClassName(String clazz) {
         Matcher matcher = FQCN.matcher(clazz);
         StringBuilder sb = new StringBuilder();

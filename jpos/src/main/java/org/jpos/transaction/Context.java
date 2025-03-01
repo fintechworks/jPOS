@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,6 +18,7 @@
 
 package org.jpos.transaction;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.jdom2.Element;
 import org.jdom2.output.Format;
 import org.jdom2.output.XMLOutputter;
@@ -29,7 +30,6 @@ import java.io.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Stream;
@@ -280,7 +280,8 @@ public class Context implements Externalizable, Loggeable, Cloneable, Pausable {
                 (now = System.currentTimeMillis()) < end)
         {
             try {
-                this.wait (end - now);
+                if (end > now)
+                    this.wait (end - now);
             } catch (InterruptedException ignored) { }
         }
         return obj;
@@ -415,14 +416,18 @@ public class Context implements Externalizable, Loggeable, Cloneable, Pausable {
         return map;
     }
 
+    @JsonIgnore
+    public Map<Object,Object> getMapClone() {
+        Map<Object,Object> cloned = Collections.synchronizedMap (new LinkedHashMap<>());
+        synchronized(getMap()) {
+            cloned.putAll(map);
+        }
+        return cloned;
+    }
+
     protected void dumpMap (PrintStream p, String indent) {
         if (map != null) {
-            Map<Object,Object> cloned;
-            cloned = Collections.synchronizedMap (new LinkedHashMap<>());
-            synchronized(map) {
-                cloned.putAll(map);
-            }
-            cloned.entrySet().forEach(e -> dumpEntry(p, indent, e));
+            getMapClone().entrySet().forEach(e -> dumpEntry(p, indent, e));
         }
     }
 

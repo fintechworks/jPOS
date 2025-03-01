@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,9 +18,11 @@
 
 package org.jpos.util;
 
+import org.jdom2.Element;
 import org.jpos.core.Configurable;
 import org.jpos.core.Configuration;
 import org.jpos.core.ConfigurationException;
+import org.jpos.core.XmlConfigurable;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -28,7 +30,6 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Date;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.time.Instant;
@@ -42,7 +43,7 @@ import java.time.ZoneId;
  * @since jPOS 1.2
  */
 public class RotateLogListener extends SimpleLogListener 
-    implements AutoCloseable, Configurable, Destroyable
+    implements AutoCloseable, Configurable, XmlConfigurable, Destroyable
 {
     FileOutputStream f;
     String logName = null;
@@ -55,6 +56,7 @@ public class RotateLogListener extends SimpleLogListener
     Rotate rotate;
     public static final int CHECK_INTERVAL = 100;
     public static final long DEFAULT_MAXSIZE = 10000000;
+    private boolean hasWriter;
 
     ScheduleTimer timer = null;
     RotationAlgo rotationAlgo = null;
@@ -139,7 +141,12 @@ public class RotateLogListener extends SimpleLogListener
                 }
             };
         }
+    }
 
+    @Override
+    public void setConfiguration(Element e) throws ConfigurationException {
+        super.setConfiguration (e); // just in case parent has something to do in the future
+        hasWriter = e != null &&  e.getChild("writer") != null;
         runPostConfiguration();
     }
 
@@ -156,11 +163,16 @@ public class RotateLogListener extends SimpleLogListener
             f.close();
         f = new FileOutputStream (logName, true);
         setPrintStream (new PrintStream(f));
-        p.println ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-        p.println ("<logger class=\"" + getClass().getName() + "\">");
+        if (!hasWriter) {
+            p.println("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+            p.println("<logger class=\"" + getClass().getName() + "\">");
+        }
     }
     protected synchronized void closeLogFile() throws IOException {
-        p.println ("</logger>");
+        if (writer != null)
+            writer.close();
+        else
+            p.println ("</logger>");
         if (f != null)
             f.close();
         f = null;
@@ -238,6 +250,8 @@ public class RotateLogListener extends SimpleLogListener
             }
         }
     }
+
+    @Override
     public void destroy () {
         if (rotate != null)
             rotate.cancel();

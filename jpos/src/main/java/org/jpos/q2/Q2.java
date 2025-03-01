@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -43,6 +43,8 @@ import org.jdom2.output.XMLOutputter;
 import org.jpos.core.Environment;
 import org.jpos.iso.ISOException;
 import org.jpos.iso.ISOUtil;
+import org.jpos.log.AuditLogEvent;
+import org.jpos.log.evt.*;
 import org.jpos.metrics.PrometheusService;
 import org.jpos.q2.install.ModuleUtils;
 // import org.jpos.q2.ssh.SshService;
@@ -65,7 +67,6 @@ import javax.management.ObjectInstance;
 import javax.management.ObjectName;
 import java.io.*;
 import java.lang.management.ManagementFactory;
-import java.net.InetSocketAddress;
 import java.nio.file.FileSystem;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -80,6 +81,8 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+
 import io.micrometer.core.instrument.binder.jvm.ClassLoaderMetrics;
 import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
 import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
@@ -88,6 +91,7 @@ import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
 
 
 import static java.util.ResourceBundle.getBundle;
+
 
 /**
  * @author <a href="mailto:taherkordy@dpi2.dpi.net.ir">Alireza Taherkordi</a>
@@ -154,25 +158,97 @@ public class Q2 implements FileFilter, Runnable {
     private PrometheusMeterRegistry prometheusRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
     private int metricsPort;
     private String metricsPath;
+    private final String statusPath = "/jpos/q2/status";
 
     private Counter instancesCounter = Metrics.counter("jpos.q2.instances");
-    
-    public Q2 (String[] args) {
+    private boolean noShutdownHook;
+    private long shutdownHookDelay = 0L;
+
+    /**
+     * Constructs a new {@code Q2} instance with the specified command-line arguments and class loader.
+     * This constructor initializes various configurations, processes command-line arguments,
+     * sets up directories, and registers necessary components for the application.
+     *
+     * @param args an array of {@code String} containing the command-line arguments.
+     * @param classLoader the {@code ClassLoader} to be used by the application.
+     *                    If {@code null}, the class loader of the current class is used.
+     *
+     * <p>Key Initialization Steps:</p>
+     * <ul>
+     *     <li>Parses the command-line arguments twice:
+     *         once before environment variable substitution and once after.</li>
+     *     <li>Initializes the deployment directory and library directory (`lib`).</li>
+     *     <li>Generates a unique instance identifier for the application instance.</li>
+     *     <li>Sets the application start time to the current moment.</li>
+     *     <li>Registers MicroMeter metrics and Q2-specific components.</li>
+     * </ul>
+     *
+     * <p>Note: The {@code deployDir} directory is created if it does not already exist.</p>
+     *
+     * @see #parseCmdLine(String[], boolean)
+     * @see #registerMicroMeter()
+     * @see #registerQ2()
+     */
+    public Q2 (String[] args, ClassLoader classLoader) {
         super();
-        this.args = args;
+        parseCmdLine (args, true);
+        this.args = environmentArgs(args);
         startTime = Instant.now();
         instanceId = UUID.randomUUID();
-        parseCmdLine (args);
+        parseCmdLine (this.args, false);
         libDir     = new File (deployDir, "lib");
         dirMap     = new TreeMap<>();
         deployDir.mkdirs ();
-        mainClassLoader = getClass().getClassLoader();
+        mainClassLoader = classLoader == null ? getClass().getClassLoader() : classLoader;
         registerMicroMeter();
         registerQ2();
     }
+
+    /**
+     * Constructs a new {@code Q2} instance with the specified command-line arguments
+     * and the default class loader.
+     *
+     * @param args an array of {@code String} containing the command-line arguments.
+     *             If no arguments are provided, the application initializes with
+     *             default settings.
+     *
+     * <p>This constructor delegates to {@link #Q2(String[], ClassLoader)} with
+     * a {@code null} class loader, causing the default class loader to be used.</p>
+     *
+     * @see #Q2(String[], ClassLoader)
+     */
+    public Q2 (String[] args) {
+        this (args, null);
+    }
+
+    /**
+     * Constructs a new {@code Q2} instance with no command-line arguments
+     * and the default class loader.
+     *
+     * <p>This constructor is equivalent to calling {@code Q2(new String[]{})}.
+     * It initializes the application with default settings.</p>
+     *
+     * @see #Q2(String[], ClassLoader)
+     * @see #Q2(String[])
+     */
+    
     public Q2 () {
         this (new String[] {});
     }
+
+    /**
+     * Constructs a new {@code Q2} instance with the specified deployment directory
+     * and the default class loader.
+     *
+     * @param deployDir a {@code String} specifying the path to the deployment directory.
+     *                  This is passed as a command-line argument using the {@code -d} option.
+     *
+     * <p>This constructor is equivalent to calling {@code Q2(new String[]{"-d", deployDir})}.
+     * It sets the deployment directory and initializes the application.</p>
+     *
+     * @see #Q2(String[], ClassLoader)
+     * @see #Q2(String[])
+     */
     public Q2 (String deployDir) {
         this (new String[] { "-d", deployDir });
     }
@@ -195,7 +271,6 @@ public class Q2 implements FileFilter, Runnable {
         started = true;
         Thread.currentThread().setName ("Q2-"+getInstanceId().toString());
         startJFR();
-
         instancesCounter.increment();
 
         Path dir = Paths.get(deployDir.getAbsolutePath());
@@ -225,7 +300,8 @@ public class Q2 implements FileFilter, Runnable {
             factory = new QFactory(loaderName, this);
             writePidFile();
             initSystemLogger();
-            addShutdownHook();
+            if (!noShutdownHook)
+                addShutdownHook();
             q2Thread = Thread.currentThread();
             q2Thread.setContextClassLoader(loader);
             if (cli != null)
@@ -237,7 +313,7 @@ public class Q2 implements FileFilter, Runnable {
             }
             if (metricsPort != 0) {
                 deployElement(
-                  PrometheusService.createDescriptor(metricsPort, metricsPath),
+                  PrometheusService.createDescriptor(metricsPort, metricsPath, statusPath),
                   "00_prometheus-" + getInstanceId() + ".xml", false, true);
             }
 
@@ -315,10 +391,13 @@ public class Q2 implements FileFilter, Runnable {
         return ready();
     }
     public void shutdown (boolean join) {
+        if (log != null) {
+            audit(auditStop(Duration.between(startTime, Instant.now())));
+        }
         shutdown.countDown();
         unregisterQ2();
         if (q2Thread != null) {
-            log.info ("shutting down");
+            // log.info ("shutting down");
             q2Thread.interrupt ();
             if (join) {
                 try {
@@ -360,6 +439,9 @@ public class Q2 implements FileFilter, Runnable {
         return NameRegistrar.get(JMX_NAME, timeout);
     }
 
+    public int node() {
+        return PGPHelper.node();
+    }
     private boolean isXml(File f) {
         return f != null && f.getName().toLowerCase().endsWith(".xml");
     }
@@ -391,8 +473,12 @@ public class Q2 implements FileFilter, Runnable {
                 long deployed   = qentry.getDeployed ();
                 if (deployed == 0) {
                     if (deploy(f)) {
-                        if (qentry.isQBean ())
-                            startList.add (qentry.getInstance());
+                        if (qentry.isQBean ()) {
+                            if (qentry.isEagerStart())
+                                start(qentry.getInstance());
+                            else
+                                startList.add(qentry.getInstance());
+                        }
                         qentry.setDeployed (f.lastModified ());
                     } else {
                         // deploy failed, clean up.
@@ -427,10 +513,14 @@ public class Q2 implements FileFilter, Runnable {
         Runtime.getRuntime().addShutdownHook (
             new Thread ("Q2-ShutdownHook") {
                 public void run () {
+                    audit (new Shutdown(getInstanceId(), shutdownHookDelay));
+                    if (shutdownHookDelay > 0)
+                        ISOUtil.sleep(shutdownHookDelay);
+                    
+                    audit(auditStop(Duration.between(startTime, Instant.now())));
                     shuttingDown = true;
                     shutdown.countDown();
                     if (q2Thread != null) {
-                        log.info ("shutting down (hook)");
                         try {
                             q2Thread.join (SHUTDOWN_TIMEOUT);
                         } catch (InterruptedException ignored) {
@@ -512,21 +602,23 @@ public class Q2 implements FileFilter, Runnable {
     }
 
     private void undeploy (File f) {
-        QEntry qentry = (QEntry) dirMap.get (f);
+        QEntry qentry = dirMap.get (f);
+        LogEvent evt = log != null ? log.createInfo().withTraceId(getInstanceId()) : null;
         try {
-            if (log != null)
-                log.trace ("undeploying:" + f.getCanonicalPath());
+            if (evt != null)
+                evt.addMessage (new UnDeploy(f.getCanonicalPath()));
 
             if (qentry.isQBean()) {
                 Object obj      = qentry.getObject ();
                 ObjectName name = qentry.getObjectName ();
                 factory.destroyQBean (this, name, obj);
             }
-            if (log != null)
-                log.info ("undeployed:" + f.getCanonicalPath());
-
         } catch (Exception e) {
-            getLog().warn ("undeploy", e);
+            if (evt != null)
+                evt.addMessage (e);
+        } finally {
+            if (evt != null)
+                Logger.log(evt);
         }
     }
 
@@ -546,7 +638,8 @@ public class Q2 implements FileFilter, Runnable {
     }
 
     private boolean deploy (File f) {
-        LogEvent evt = log != null ? log.createInfo() : null;
+        LogEvent evt = log != null ? log.createInfo().withTraceId(getInstanceId()) : null;
+        boolean enabled;
         try {
             QEntry qentry = dirMap.get (f);
             SAXBuilder builder = createSAXBuilder();
@@ -569,19 +662,17 @@ public class Q2 implements FileFilter, Runnable {
                     return false;
                 }
             }
-            if (QFactory.isEnabled(rootElement)) {
-                if (evt != null) {
-                    evt.addMessage("deploy: " + f.getCanonicalPath());
-                }
+            enabled = QFactory.isEnabled(rootElement);
+            qentry.setEagerStart(QFactory.isEagerStart(rootElement));
+            if (evt != null)
+                evt.addMessage(new Deploy(f.getCanonicalPath(), enabled, qentry.isEagerStart()));
+            if (enabled) {
                 Object obj = factory.instantiate (this, factory.expandEnvProperties(rootElement));
                 qentry.setObject (obj);
-
                 ObjectInstance instance = factory.createQBean (
                     this, doc.getRootElement(), obj
                 );
                 qentry.setInstance (instance);
-            } else if (evt != null) {
-                evt.addMessage("deploy ignored (enabled='" + QFactory.getEnabledAttribute(rootElement) + "'): " + f.getCanonicalPath());
             }
         } 
         catch (InstanceAlreadyExistsException e) {
@@ -592,27 +683,29 @@ public class Q2 implements FileFilter, Runnable {
             * Rename it out of the way.
             * 
             */
-            tidyFileAway(f,DUPLICATE_EXTENSION);
+            tidyFileAway(f,DUPLICATE_EXTENSION, evt);
             if (evt != null)
                 evt.addMessage(e);
             return false;
         }
         catch (Exception e) {
-            if (evt != null)
+            if (evt != null) {
                 evt.addMessage(e);
-            tidyFileAway(f,ERROR_EXTENSION);
+            }
+            tidyFileAway(f,ERROR_EXTENSION, evt);
             // This will also save deploy error repeats...
             return false;
         } 
         catch (Error e) {
             if (evt != null)
                 evt.addMessage(e);
-            tidyFileAway(f,ENV_EXTENSION);
+            tidyFileAway(f,ENV_EXTENSION, evt);
             // This will also save deploy error repeats...
             return false;
         } finally {
-            if (evt != null)
+            if (evt != null) {
                 Logger.log(evt);
+            }
         }
         return true ;
     }
@@ -643,11 +736,7 @@ public class Q2 implements FileFilter, Runnable {
                 getLog().warn ("init-system-logger", e);
             }
         }
-        Environment env = Environment.getEnvironment();
-        getLog().info("Q2 started, deployDir=" + deployDir.getAbsolutePath() + ", environment=" + env.getName());
-        if (env.getErrorString() != null)
-            getLog().error(env.getErrorString());
-
+        audit (auditStart());
     }
     public Log getLog () {
         if (log == null) {
@@ -661,8 +750,8 @@ public class Q2 implements FileFilter, Runnable {
     public MBeanServer getMBeanServer () {
         return server;
     }
-    public long getUptime() {
-        return Duration.between(startTime, Instant.now()).toMillis();
+    public Duration getUptime() {
+        return Duration.between(startTime, Instant.now());
     }
     public void displayVersion () {
         System.out.println(getVersionString());
@@ -703,7 +792,7 @@ public class Q2 implements FileFilter, Runnable {
         }
         return s;
     }
-    private void parseCmdLine (String[] args) {
+    private void parseCmdLine (String[] args, boolean environmentOnly) {
         CommandLineParser parser = new DefaultParser ();
 
         Options options = new Options ();
@@ -722,9 +811,11 @@ public class Q2 implements FileFilter, Runnable {
         options.addOption ("sa", "ssh-authorized-keys", true, "Path to authorized key file (defaults to 'cfg/authorized_keys')");
         options.addOption ("su", "ssh-user", true, "SSH user (defaults to 'admin')");
         options.addOption ("sh", "ssh-host-key-file", true, "SSH host key file, defaults to 'cfg/hostkeys.ser'");
+        options.addOption ("sd", "shutdown-delay", true, "Shutdown delay in seconds (defaults to immediate)");
         options.addOption ("Ns", "no-scan", false, "Disables deploy directory scan");
         options.addOption ("Nd", "no-dynamic", false, "Disables dynamic classloader");
         options.addOption ("Nf", "no-jfr", false, "Disables Java Flight Recorder");
+        options.addOption ("Nh", "no-shutdown-hook", false, "Disable shutdown hook");
         options.addOption ("E", "environment", true, "Environment name.\nCan be given multiple times (applied in order, and values may override previous ones)");
         options.addOption ("Ed", "envdir", true, "Environment file directory, defaults to cfg");
         options.addOption ("mp", "metrics-port", true, "Metrics port");
@@ -734,16 +825,6 @@ public class Q2 implements FileFilter, Runnable {
             System.setProperty("log4j2.formatMsgNoLookups", "true"); // log4shell prevention
 
             CommandLine line = parser.parse (options, args);
-            if (line.hasOption ("v")) {
-                displayVersion();
-                System.exit (0);
-            } 
-            if (line.hasOption ("h")) {
-                HelpFormatter helpFormatter = new HelpFormatter ();
-                helpFormatter.printHelp ("Q2", options);
-                System.exit (0);
-            } 
-
             // set up envdir and env before other parts of the system, so env is available
             // force reload if any of the env options was changed
             if (line.hasOption("Ed")) {
@@ -753,6 +834,18 @@ public class Q2 implements FileFilter, Runnable {
                 System.setProperty("jpos.env", ISOUtil.commaEncode(line.getOptionValues("E")));
             }
 
+            if (environmentOnly) // first call just to properly parse environment, in order to get optional q2.args from yaml
+                return;
+
+            if (line.hasOption ("v")) {
+                displayVersion();
+                System.exit (0);
+            } 
+            if (line.hasOption ("h")) {
+                HelpFormatter helpFormatter = new HelpFormatter ();
+                helpFormatter.printHelp ("Q2", options);
+                System.exit (0);
+            } 
             if (line.hasOption ("c")) {
                 cli = new CLI(this, line.getOptionValue("c"), line.hasOption("i"));
             } else if (line.hasOption ("i")) 
@@ -785,18 +878,21 @@ public class Q2 implements FileFilter, Runnable {
             if (line.hasOption("mp"))
                 metricsPort = Integer.parseInt(line.getOptionValue("mp"));
             metricsPath = line.hasOption("mP") ? line.getOptionValue("mP") : "/metrics";
-        } catch (MissingArgumentException e) {
+            noShutdownHook = line.hasOption("Nh");
+            shutdownHookDelay = line.hasOption ("sd") ? 1000L*Integer.parseInt(line.getOptionValue("sd")) : 0;
+
+            if (noShutdownHook && shutdownHookDelay > 0)
+                throw new IllegalArgumentException ("--no-shutdown-hook incompatible with --shutdown-delay argument");
+        } catch (MissingArgumentException | IllegalArgumentException | IllegalAccessError |
+                 UnrecognizedOptionException e) {
             System.out.println("ERROR: " + e.getMessage());
-            System.exit(1);
-        } catch (IllegalAccessError | UnrecognizedOptionException e) {
-            System.out.println(e.getMessage());
             System.exit(1);
         } catch (Exception e) {
             e.printStackTrace ();
             System.exit (1);
         }
     }
-    private void deployBundle (File bundle, boolean encrypt) 
+    private void deployBundle (File bundle, boolean encrypt)
         throws JDOMException, IOException, 
                 ISOException, GeneralSecurityException
     {
@@ -887,16 +983,22 @@ public class Q2 implements FileFilter, Runnable {
         return doc;
     }
 
-    private void tidyFileAway (File f, String extension) {
+    private void tidyFileAway (File f, String extension, LogEvent evt) {
         File rename = new File(f.getAbsolutePath()+"."+extension);
         while (rename.exists()){
             rename = new File(rename.getAbsolutePath()+"."+extension);
         }
-        if (f.renameTo(rename)){
-            getLog().warn("Tidying "+f.getAbsolutePath()+" out of the way, by adding ."+extension,"It will be called: "+rename.getAbsolutePath()+" see log above for detail of problem.");
-        }
-        else {
-            getLog().warn("Error Tidying. Could not tidy  "+f.getAbsolutePath()+" out of the way, by adding ."+extension,"It could not be called: "+rename.getAbsolutePath()+" see log above for detail of problem.");
+        if (evt != null) {
+            if (f.renameTo(rename)){
+                evt.addMessage(
+                  new DeployActivity(DeployActivity.Action.RENAME, String.format ("%s to %s", f.getAbsolutePath(), rename.getAbsolutePath()))
+                );
+            }
+            else {
+                evt.addMessage(
+                  new DeployActivity(DeployActivity.Action.RENAME_ERROR, String.format ("%s to %s", f.getAbsolutePath(), rename.getAbsolutePath()))
+                );
+            }
         }
     }
 
@@ -946,14 +1048,13 @@ public class Q2 implements FileFilter, Runnable {
             }
         }
     }
-    private void logVersion () {
+    private void logVersion () throws IOException {
         long now = System.currentTimeMillis();
         if (now - lastVersionLog > 86400000L) {
-            LogEvent evt = getLog().createLogEvent("version");
-            evt.addMessage(getVersionString());
-            Logger.log(evt);
+            License l = PGPHelper.getLicense();
+            audit(l);
             lastVersionLog = now;
-            while (running() && (PGPHelper.checkLicense() & 0xF0000) != 0)
+            while (running() && (l.status() & 0xF0000) != 0)
                 relax(60000L);
         }
     }
@@ -1019,6 +1120,7 @@ public class Q2 implements FileFilter, Runnable {
         long deployed;
         ObjectInstance instance;
         Object obj;
+        boolean eagerStart;
         public QEntry () {
             super();
         }
@@ -1053,6 +1155,14 @@ public class Q2 implements FileFilter, Runnable {
         }
         public boolean isQPersist () {
             return obj instanceof QPersist;
+        }
+
+        public boolean isEagerStart() {
+            return eagerStart;
+        }
+
+        public void setEagerStart(boolean eagerStart) {
+            this.eagerStart = eagerStart;
         }
     }
 
@@ -1103,21 +1213,22 @@ public class Q2 implements FileFilter, Runnable {
     private boolean waitForChanges (WatchService service) throws InterruptedException {
         WatchKey key = service.poll (SCAN_INTERVAL, TimeUnit.MILLISECONDS);
         if (key != null) {
-            LogEvent evt = getLog().createInfo();
+            LogEvent evt = getLog().createInfo().withTraceId(getInstanceId());
             for (WatchEvent<?> ev : key.pollEvents()) {
                 if (ev.kind() == StandardWatchEventKinds.ENTRY_CREATE) {
-                    evt.addMessage(String.format ("created %s/%s", deployDir.getName(), ev.context()));
+                    evt.addMessage(new DeployActivity(DeployActivity.Action.CREATE, String.format ("%s/%s", deployDir.getName(), ev.context())));
                 } else if (ev.kind() == StandardWatchEventKinds.ENTRY_DELETE) {
-                    evt.addMessage(String.format ("removed %s/%s", deployDir.getName(), ev.context()));
+                    evt.addMessage(new DeployActivity(DeployActivity.Action.DELETE, String.format ("%s/%s", deployDir.getName(), ev.context())));
                 } else if (ev.kind() == StandardWatchEventKinds.ENTRY_MODIFY) {
-                    evt.addMessage(String.format ("modified %s/%s", deployDir.getName(), ev.context()));
+                    evt.addMessage(new DeployActivity(DeployActivity.Action.MODIFY, String.format ("%s/%s", deployDir.getName(), ev.context())));
                 }
             }
             Logger.log(evt);
             if (!key.reset()) {
-                getLog().warn(String.format (
-                  "deploy directory '%s' no longer valid",
-                  deployDir.getAbsolutePath())
+                getLog().warn(
+                  String.format (
+                    "deploy directory '%s' no longer valid",
+                    deployDir.getAbsolutePath())
                 );
                 return false; // deploy directory no longer valid
             }
@@ -1215,6 +1326,8 @@ public class Q2 implements FileFilter, Runnable {
     }
 
     private void registerMicroMeter () {
+        System.setProperty("slf4j.internal.verbosity","ERROR");
+
         meterRegistry.clear(); // start Q2 off a fresh meter registry
         new ClassLoaderMetrics().bindTo(meterRegistry);
         new JvmMemoryMetrics().bindTo(meterRegistry);
@@ -1222,5 +1335,38 @@ public class Q2 implements FileFilter, Runnable {
         new ProcessorMetrics().bindTo(meterRegistry);
         new JvmThreadMetrics().bindTo(meterRegistry);
         meterRegistry.add (prometheusRegistry);
+    }
+
+    public String[] environmentArgs (String[] args) {
+        String envArgs = Environment.getEnvironment().getProperty("${q2.args}", null);
+        return (envArgs != null ?
+            Stream.concat(
+              Arrays.stream(ISOUtil.commaDecode(envArgs)), Arrays.stream(args))
+                .toArray(String[]::new) : args);
+    }
+
+    private void audit (AuditLogEvent sal) {
+        Logger.log(getLog().createInfo(sal).withTraceId(getInstanceId()));
+    }
+
+    private Start auditStart() {
+        Environment env = Environment.getEnvironment();
+        String envName = env.getName();
+        if (env.getErrorString() != null)
+            envName = envName + " (" + env.getErrorString() + ")";
+        return new Start(
+          getQ2().getInstanceId(),
+          getVersion(),
+          getAppVersionString(),
+          getDeployDir().getAbsolutePath(),
+          envName
+        );
+    }
+
+    private Stop auditStop(Duration dur) {
+        return new Stop(
+          getInstanceId(),
+          dur
+        );
     }
 }

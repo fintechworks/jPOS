@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -317,7 +317,8 @@ public class ISOCurrencyTest {
         c.put("504", "MAD"); cD.put("504", 2); // Moroccan Dirham WESTERN SAHARA 
         c.put("886", "YER"); cD.put("886", 2); // Yemeni Rial YEMEN 
         c.put("967", "ZMW"); cD.put("967", 2); // Zambian Kwacha ZAMBIA 
-        c.put("932", "ZWL"); cD.put("932", 2); // Zimbabwe Dollar ZIMBABWE 
+        c.put("932", "ZWL"); cD.put("932", 2); // Zimbabwe Dollar ZIMBABWE
+        c.put("924", "ZWG"); cD.put("924", 2); // Zimbabwe Gold ZIMBABWE
         
         StringBuilder msg = new StringBuilder();
         

@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -903,43 +903,37 @@ public class ISOUtil {
      * @param mask char used to protect the string
      * @return 'protected' String
      */
-    public static String protect (String s, char mask) {
-        StringBuilder sb = new StringBuilder();
-        int len   = s.length();
-        int clear = len > 6 ? 6 : 0;
-        int lastFourIndex = -1;
-        if (clear > 0) {
-            lastFourIndex = s.indexOf ('=') - 4;
-            if (lastFourIndex < 0)
-                lastFourIndex = s.indexOf ('^') - 4;
-            if (lastFourIndex < 0 && s.indexOf('^')<0)
-                lastFourIndex = s.indexOf('D') - 4;
-            if (lastFourIndex < 0)
-                lastFourIndex = len - 4;
+
+    public static String protect(String s, char mask) {
+        // Validation for minimum length
+        if (s.length() <= 4) {
+            char[] maskedArray = new char[s.length()];
+            Arrays.fill(maskedArray, mask);// 6 (BIN) + 4 (last digits) = 10
+            return new String(maskedArray);
         }
-        for (int i=0; i<len; i++) {
-            if (s.charAt(i) == '=' || s.charAt(i) == 'D' && s.indexOf('^')<0)
-                clear = 1;  // use clear=5 to keep the expiration date
-            else if (s.charAt(i) == '^') {
-                lastFourIndex = 0;
-                clear = len - i;
+        StringBuilder ps = new StringBuilder(s);
+
+        // Identify the positions of separators (^ and =)
+        String separator = s.contains("^") ? "^" : s.contains("=") ? "=" : null;
+        int firstSeparatorIndex = separator != null ? ps.indexOf(separator) : s.length();
+        if (firstSeparatorIndex < 6) {
+            return s; // nothing to do
+        }
+        int lastDigitIndex = firstSeparatorIndex - 4;
+
+        // Replace characters with underscore except BIN, last four digits and separators
+        for (int i = 6; i < lastDigitIndex; i++) {
+            ps.setCharAt(i, mask);
+        }
+        if (separator != null) {
+            for (int i = firstSeparatorIndex + 1; i < ps.length(); i++) {
+                char c = ps.charAt(i);
+                if ((c != '=' && c != '^')) {
+                    ps.setCharAt(i, mask);
+                }
             }
-            else if (i == lastFourIndex)
-                clear = 4;
-            sb.append (clear-- > 0 ? s.charAt(i) : mask);
         }
-        s = sb.toString();
-        try {
-            //Addresses Track1 Truncation
-            int charCount = s.replaceAll("[^\\^]", "").length();
-            if (charCount == 2 ) {
-                s = s.substring(0, s.lastIndexOf("^")+1);
-                s = ISOUtil.padright(s, len, mask);
-            }
-        } catch (ISOException e){
-            //cannot PAD - should never get here
-        }
-        return s;
+        return ps.toString();
     }
     public static String protect(String s) {
         return protect(s, '_');
@@ -1739,5 +1733,33 @@ public class ISOUtil {
         } else {
             return i < split.length ? split[i] : "";
         }
+    }
+
+    public static String toUnicodeString(String input) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : input.toCharArray()) {
+            sb.append(String.format("\\u%04x", (int) c));
+        }
+        return sb.toString();
+    }
+
+    public static String toASCII(String s) {
+        return toSingleByte (s, 0x7F);
+    }
+    public static String toLatin(String s) {
+        return toSingleByte (s, 0xFF);
+    }
+    
+    private static String toSingleByte(String s, int mask) {
+        StringBuilder sb = new StringBuilder();
+        s.codePoints().forEach(cp -> {
+            if (cp > mask) {
+                sb.append(" ");
+                if (cp > 0xFFFF) // multi-byte character
+                    sb.append(" ");
+            } else
+                sb.appendCodePoint(cp); // Append the single-byte character
+        });
+        return sb.toString();
     }
 }

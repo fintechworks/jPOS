@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -33,10 +33,11 @@ import org.bouncycastle.openpgp.operator.KeyFingerPrintCalculator;
 import org.bouncycastle.openpgp.operator.PBESecretKeyDecryptor;
 import org.bouncycastle.openpgp.operator.bc.*;
 import org.bouncycastle.openpgp.operator.jcajce.JcaPGPContentVerifierBuilderProvider;
+import org.jpos.core.Environment;
 import org.jpos.iso.ISOUtil;
+import org.jpos.log.evt.License;
 import org.jpos.q2.Q2;
 import org.jpos.q2.install.ModuleUtils;
-import org.jpos.security.SystemSeed;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -45,9 +46,24 @@ public class PGPHelper {
     private static KeyFingerPrintCalculator fingerPrintCalculator = new BcKeyFingerprintCalculator();
     private static final String PUBRING = "META-INF/.pgp/pubring.asc";
     private static final String SIGNER = "license@jpos.org";
+    private static int node;
     static {
         if(Security.getProvider("BC") == null)
             Security.addProvider(new BouncyCastleProvider());
+
+        String nodeString = Environment.get("${q2.node:1}");
+        Pattern pattern = Pattern.compile("\\d+");
+
+        try {
+            Matcher matcher = pattern.matcher(nodeString);
+            node = (nodeString == null || nodeString.isEmpty())
+              ? 1 // Default value if nodeString is null or empty
+              : (matcher.find()
+              ? Integer.parseInt(matcher.group()) // Use matched digits if found
+              : 1); // Default value if no match is found
+        } catch (Throwable e) {
+            node = 0; // Fallback to default value in case of any exception
+        }
     }
 
     private static boolean verifySignature(InputStream in, PGPPublicKey pk) throws IOException, PGPException {
@@ -205,7 +221,9 @@ public class PGPHelper {
                             }
                             matcher = p2.matcher(s);
                             if (matcher.find() && matcher.groupCount() == 2) {
-                                rc |= Integer.parseInt(matcher.group(2));
+                                int n = Integer.parseInt(matcher.group(2));
+                                node = n >= node ? node : 0;
+                                rc |= n;
                             }
                             if (s.contains(h)) {
                                 rc &= 0xEFFFF;
@@ -246,6 +264,10 @@ public class PGPHelper {
     }
     public static String getLicenseeHash() throws IOException, NoSuchAlgorithmException {
         return ISOUtil.hexString(hash(getLicensee()));
+    }
+
+    public static int node () {
+        return node;
     }
 
     /**
@@ -424,6 +446,9 @@ public class PGPHelper {
         return decrypt (encrypted, new FileInputStream(keyIn), password);
     }
 
+    public static License getLicense() throws IOException {
+        return new License(getLicensee(), checkLicense());
+    }
 
     private static PGPPublicKey[] readPublicKeys(InputStream in, String[] ids)
       throws IOException, PGPException

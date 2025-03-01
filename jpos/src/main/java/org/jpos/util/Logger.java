@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -94,10 +94,10 @@ public class Logger implements LogProducer,Configurable
             l = getLogger(Q2.LOGGER_NAME);
         }
         if (l != null && l.hasListeners ()) {
-            Iterator i = l.listeners.iterator();
+            Iterator<LogListener> i = l.listeners.iterator();
             while (i.hasNext() && evt != null) {
                 try {
-                    evt = ((LogListener) i.next()).log(evt);
+                    evt = i.next().log(evt);
                 } catch (ConcurrentModificationException e) {
                     break;
                 } catch (Throwable t) {

@@ -1,6 +1,6 @@
 /*
  * jPOS Project [http://jpos.org]
- * Copyright (C) 2000-2023 jPOS Software SRL
+ * Copyright (C) 2000-2024 jPOS Software SRL
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -25,10 +25,6 @@ import java.util.Date;
 public interface TransactionManagerMBean extends QBeanSupportMBean {
     long getHead();
     long getTail();
-    void setDebug(boolean debug);
-    boolean getDebug();
-    void setDebugContext(boolean debugContext);
-    boolean getDebugContext();
     int getOutstandingTransactions();
     int getActiveSessions();
     int getMaxSessions();
